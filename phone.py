@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = "8980586429:AAHo3dkEiE2Veb7rLYgE-8xWD9h4CANjHgo"
 CHAT_ID = "1519060691"  # Telegram sayısal ID'niz 
 
-MIN_PROFIT_DEFAULT = 60.0  # Bildirim için minimum kâr eşiği (€)
+MIN_PROFIT_DEFAULT = 10.0  # Bildirim için minimum kâr eşiği (€)
 BGN_TO_EUR_RATE = 1.95583  # Bulgar Levası -> Euro sabit kur
 
 # iPhone 13 Pro Max piyasa referans fiyatı (€)
