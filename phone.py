@@ -2,21 +2,22 @@ import os
 import re
 import time
 import threading
+from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
 
 # ================= AYARLAR =================
 BOT_TOKEN = "8980586429:AAHo3dkEiE2Veb7rLYgE-8xWD9h4CANjHgo"
-CHAT_ID = "1519060691"  # Kendi sayısal ID'ni buraya yaz
+CHAT_ID = "1519060691"  # Kendi sayısal ID numaranı yaz
 
-# BGN -> EUR sabit kuru
 BGN_TO_EUR = 1.95583
 
-# Bildirim tetikleme eşiği (Euro)
-MIN_PROFIT_DEFAULT = 50.0  # Az ve öz fırsatlar için 50 € idealdir, dilediğinde değiştirebilirsin
+# Dinamik Filtre Değişkenleri
+MIN_PROFIT_DEFAULT = 50.0   # Minimum kâr eşiği (€)
+MAX_BUDGET = 9999.0         # Maksimum bütçe sınırı (€)
+FILTER_MODEL = None         # Belirli bir model filtresi (None = hepsi)
 
-# Model referans piyasa fiyatları (Euro)
 BASE_MARKET_PRICES = {
     "iphone 11": 220.0,
     "iphone 11 pro": 270.0,
@@ -39,7 +40,6 @@ BASE_MARKET_PRICES = {
     "iphone 15 pro max": 930.0,
 }
 
-# Negatif filtre kelimeleri
 EXCLUDE_KEYWORDS = [
     "icloud", "за части", "chasti", "ne raboti", "не работи",
     "povreda", "повреда", "schupen", "счупен", "display", "дисплей",
@@ -47,10 +47,10 @@ EXCLUDE_KEYWORDS = [
 ]
 
 SEEN_LISTING_IDS = set()
+LAST_SCAN_TIME = "Henüz yapılmadı"
 
 # ================= YARDIMCI FONKSİYONLAR =================
 def send_telegram_message(message: str):
-    """Telegram üzerinden HTML mesaj gönderir."""
     if CHAT_ID == "BURAYA_KENDI_SAYISAL_IDNI_YAZ" or not CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -89,27 +89,24 @@ def detect_model(title: str):
     return matched_model
 
 def format_deals_message(deals: list) -> str:
-    """Birden fazla fırsatı tek ve şık bir mesaj metninde birleştirir."""
-    header = f"🎯 <b>YENİ FIRSAT YAKALANDI ({len(deals)} İlan)</b>\n\n"
+    header = f"🎯 <b>FIRSATLAR ({len(deals)} İlan)</b>\n\n"
     items_text = []
-    
     for d in deals:
         block = (
             f"📱 <b>{d['model']}</b>\n"
             f"🏷 <i>{d['title']}</i>\n"
             f"💵 <b>Fiyat:</b> {d['price_eur']:.2f} €\n"
             f"📊 <b>Piyasa:</b> ~{d['market_eur']:.2f} €\n"
-            f"📈 <b>Net Kâr:</b> <b>+{d['profit_eur']:.2f} €</b>\n"
-            f"🔗 <a href='{d['url']}'>İlana Gitmek İçin Tıkla</a>"
+            f"📈 <b>Kâr:</b> <b>+{d['profit_eur']:.2f} €</b>\n"
+            f"🔗 <a href='{d['url']}'>İlana Git</a>"
         )
         items_text.append(block)
-        
     return header + "\n\n──────────────────\n\n".join(items_text)
 
 # ================= SCRAPING VE PARSING =================
 def scrape_olx_page(page: int = 1):
+    global LAST_SCAN_TIME
     target_url = f"https://www.olx.bg/elektronika/telefoni/iphone/?search%5Border%5D=created_at:desc&page={page}"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "bg-BG,bg;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -118,11 +115,10 @@ def scrape_olx_page(page: int = 1):
     
     try:
         resp = cffi_requests.get(target_url, headers=headers, impersonate="chrome120", timeout=15)
+        LAST_SCAN_TIME = datetime.now().strftime("%H:%M:%S")
         if resp.status_code != 200:
-            print(f"[!] OLX yanıt vermedi, durum: {resp.status_code}")
             return []
-    except Exception as e:
-        print(f"[!] İstek hatası: {e}")
+    except Exception:
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -138,7 +134,6 @@ def scrape_olx_page(page: int = 1):
             link_tag = card.select_one('a[href*="/d/ad/"]') or card.find('a', href=True)
             if not link_tag:
                 continue
-            
             href = link_tag.get("href", "")
             url = f"https://www.olx.bg{href}" if href.startswith("/") else href
             listing_id = card.get("id") or href.split("-ID")[-1].split(".")[0]
@@ -155,18 +150,13 @@ def scrape_olx_page(page: int = 1):
             if price_eur <= 0:
                 continue
 
-            listings.append({
-                "id": listing_id,
-                "title": title,
-                "price_eur": price_eur,
-                "url": url
-            })
+            listings.append({"id": listing_id, "title": title, "price_eur": price_eur, "url": url})
         except Exception:
             continue
 
     return listings
 
-def evaluate_and_filter(listings, min_profit=MIN_PROFIT_DEFAULT):
+def evaluate_and_filter(listings, min_profit, max_budget=9999.0, model_filter=None):
     good_deals = []
     for item in listings:
         title_low = item["title"].lower()
@@ -177,9 +167,16 @@ def evaluate_and_filter(listings, min_profit=MIN_PROFIT_DEFAULT):
         if not model:
             continue
             
+        # Model filtresi kontrolü
+        if model_filter and model_filter.lower() not in model.lower():
+            continue
+            
+        # Bütçe filtresi kontrolü
+        if item["price_eur"] > max_budget:
+            continue
+            
         market_val = BASE_MARKET_PRICES[model]
         profit = market_val - item["price_eur"]
-        
         if profit >= min_profit:
             good_deals.append({
                 "id": item["id"],
@@ -192,32 +189,27 @@ def evaluate_and_filter(listings, min_profit=MIN_PROFIT_DEFAULT):
             })
     return good_deals
 
-# ================= TELEGRAM DİNLEYİCİ VE TARAYICI =================
+# ================= ARKA PLAN DÖNGÜSÜ =================
 def background_auto_scanner():
-    """Her 5 dakikada bir tarar, bulduğu tüm yeni ilanları TEK BİR MESAJDA iletir."""
     while True:
         try:
             items = scrape_olx_page(page=1)
-            deals = evaluate_and_filter(items, min_profit=MIN_PROFIT_DEFAULT)
-            
-            # Sadece daha önce iletilmemiş yeni ilanları seç
+            deals = evaluate_and_filter(items, min_profit=MIN_PROFIT_DEFAULT, max_budget=MAX_BUDGET, model_filter=FILTER_MODEL)
             new_deals = []
             for deal in deals:
                 if deal["id"] not in SEEN_LISTING_IDS:
                     SEEN_LISTING_IDS.add(deal["id"])
                     new_deals.append(deal)
-            
-            # Yeni fırsat varsa bekletmeden tek bir mesaj olarak at
             if new_deals:
                 single_message = format_deals_message(new_deals)
                 send_telegram_message(single_message)
-                
         except Exception as e:
-            print(f"[!] Otomatik tarama döngü hatası: {e}")
+            print(f"[!] Otomatik tarama hatası: {e}")
         time.sleep(300)
 
+# ================= SADELEŞTİRİLMİŞ TELEGRAM KOMUTLARI =================
 def telegram_listener():
-    """Manuel /tara komutu geldiğinde anlık bulunanları tek mesajda toplar."""
+    global MIN_PROFIT_DEFAULT, MAX_BUDGET, FILTER_MODEL, SEEN_LISTING_IDS
     last_update_id = 0
     while True:
         try:
@@ -227,26 +219,95 @@ def telegram_listener():
                 for upd in resp.get("result", []):
                     last_update_id = upd["update_id"]
                     msg_obj = upd.get("message", {})
-                    text = msg_obj.get("text", "").strip().lower()
+                    text = msg_obj.get("text", "").strip()
+                    lower_text = text.lower()
 
-                    if text in ["/tara", "tara"]:
-                        send_telegram_message("🔍 OLX taranıyor, güncel fırsatlar hesaplanıyor...")
+                    # 1. TARA (tara, /tara)
+                    if lower_text in ["tara", "/tara"]:
+                        send_telegram_message("🔍 OLX taranıyor...")
                         items = scrape_olx_page(page=1)
-                        deals = evaluate_and_filter(items, min_profit=MIN_PROFIT_DEFAULT)
-                        
+                        deals = evaluate_and_filter(items, min_profit=MIN_PROFIT_DEFAULT, max_budget=MAX_BUDGET, model_filter=FILTER_MODEL)
                         if not deals:
-                            send_telegram_message(f"⚠️ Şu anda minimum kâr eşiğini ({MIN_PROFIT_DEFAULT:.0f} €) geçen yeni ilan bulunamadı.")
+                            send_telegram_message(f"⚠️ Kriterlere uygun (+{MIN_PROFIT_DEFAULT:.0f} € kâr) yeni ilan bulunamadı.")
                         else:
-                            # İlk 5 fırsatı tek mesaj kartı olarak gönderir
                             msg = format_deals_message(deals[:5])
                             send_telegram_message(msg)
+
+                    # 2. KAR (kar 60, /kar 60)
+                    elif lower_text.startswith("kar") or lower_text.startswith("/kar"):
+                        parts = text.split()
+                        if len(parts) >= 2 and parts[1].replace(".", "", 1).isdigit():
+                            MIN_PROFIT_DEFAULT = float(parts[1])
+                            send_telegram_message(f"✅ Kâr eşiği: <b>+{MIN_PROFIT_DEFAULT:.0f} €</b>")
+                        else:
+                            send_telegram_message("⚠️ Örnek: <code>kar 60</code>")
+
+                    # 3. BUTCE (butce 400, /butce 400)
+                    elif lower_text.startswith("butce") or lower_text.startswith("/butce"):
+                        parts = text.split()
+                        if len(parts) >= 2 and parts[1].replace(".", "", 1).isdigit():
+                            MAX_BUDGET = float(parts[1])
+                            send_telegram_message(f"✅ Maksimum bütçe: <b>{MAX_BUDGET:.0f} €</b>")
+                        else:
+                            send_telegram_message("⚠️ Örnek: <code>butce 400</code>")
+
+                    # 4. MODEL (model 13 pro, /model 13, model hepsi)
+                    elif lower_text.startswith("model") or lower_text.startswith("/model"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2:
+                            val = parts[1].strip()
+                            if val.lower() in ["hepsi", "tum", "iptal", "reset"]:
+                                FILTER_MODEL = None
+                                send_telegram_message("✅ Model filtresi kaldırıldı. Tüm iPhone'lar aranıyor.")
+                            else:
+                                FILTER_MODEL = val
+                                send_telegram_message(f"✅ Hedef model: <b>iPhone {FILTER_MODEL.upper()}</b>")
+                        else:
+                            send_telegram_message("⚠️ Örnek: <code>model 13 pro</code> veya <code>model hepsi</code>")
+
+                    # 5. DURUM (durum, /durum)
+                    elif lower_text in ["durum", "/durum"]:
+                        model_str = f"iPhone {FILTER_MODEL.upper()}" if FILTER_MODEL else "Tüm Modeller"
+                        budget_str = f"{MAX_BUDGET:.0f} €" if MAX_BUDGET < 9000 else "Sınırsız"
+                        status_msg = (
+                            "⚙️ <b>Güncel Durum & Ayarlar</b>\n\n"
+                            f"• <b>Kâr Eşiği:</b> +{MIN_PROFIT_DEFAULT:.0f} €\n"
+                            f"• <b>Bütçe Limiti:</b> {budget_str}\n"
+                            f"• <b>Filtrelenen Model:</b> {model_str}\n"
+                            f"• <b>Hafızadaki İlan:</b> {len(SEEN_LISTING_IDS)} adet\n"
+                            f"• <b>Son Tarama:</b> {LAST_SCAN_TIME}\n"
+                            f"• <b>Sistem:</b> 7/24 Aktif"
+                        )
+                        send_telegram_message(status_msg)
+
+                    # 6. SIFIRLA (sifirla, /sifirla)
+                    elif lower_text in ["sifirla", "/sifirla"]:
+                        MIN_PROFIT_DEFAULT = 50.0
+                        MAX_BUDGET = 9999.0
+                        FILTER_MODEL = None
+                        SEEN_LISTING_IDS.clear()
+                        send_telegram_message("🔄 <b>Tüm ayarlar ve ilan hafızası sıfırlandı!</b>\n(Kâr: +50 €, Bütçe: Sınırsız, Modeller: Hepsi)")
+
+                    # 7. YARDIM (yardim, /yardim, ?)
+                    elif lower_text in ["yardim", "/yardim", "?", "/help", "/start"]:
+                        help_text = (
+                            "🤖 <b>Kullanabileceğin Komutlar:</b>\n\n"
+                            "• <b>tara</b> : Fırsatları tek mesajda listeler\n"
+                            "• <b>kar 60</b> : Minimum net kâr eşiğini ayarlar\n"
+                            "• <b>butce 350</b> : Maksimum cihaz fiyatını sınırlar\n"
+                            "• <b>model 13</b> : Sadece belirtilen modeli arar (kaldırmak için: <code>model hepsi</code>)\n"
+                            "• <b>durum</b> : Aktif filtreleri ve ayarları gösterir\n"
+                            "• <b>sifirla</b> : Tüm ayarları ve hafızayı sıfırlar\n"
+                            "• <b>yardim</b> : Bu listeyi açar"
+                        )
+                        send_telegram_message(help_text)
+
         except Exception as e:
             print(f"[!] Listener hatası: {e}")
         time.sleep(2)
 
 def main():
     print("[*] iPhone Fırsat Radarı Aktif...")
-    
     listener_thread = threading.Thread(target=telegram_listener, daemon=True)
     listener_thread.start()
 
@@ -255,9 +316,8 @@ def main():
 
     send_telegram_message(
         "🚀 <b>iPhone Fırsat Radarı Devrede!</b>\n\n"
-        f"• Yalnızca <b>+{MIN_PROFIT_DEFAULT:.0f} € ve üzeri</b> kâr bırakan ilanlar taranır.\n"
-        "• Yeni fırsatlar tek bir özet bildirim kartında iletilir.\n"
-        "• Dilediğin zaman <b>/tara</b> yazabilirsin."
+        f"• Kâr Eşiği: <b>+{MIN_PROFIT_DEFAULT:.0f} €</b>\n"
+        "• Komutları görmek için <b>yardim</b> yazabilirsin."
     )
 
     while True:
