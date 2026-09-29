@@ -10,13 +10,13 @@ from curl_cffi import requests
 
 # ================= TELEGRAM AYARLARI =================
 BOT_TOKEN = "8980586429:AAHo3dkEiE2Veb7rLYgE-8xWD9h4CANjHgo"
-CHAT_ID = "1519060691"  # @userinfobot'un verdiği ID rakamları
+CHAT_ID = "1519060691"  # Kendi Chat ID numaranı buraya yaz
 
-SCAN_LIMIT = 80              # Hızlı tarama için en yeni 80 ilan taranır
+SCAN_LIMIT = 80              # Taranacak ilan adedi
 CHECK_INTERVAL_SEC = 300     # 5 dakikada bir kontrol eder (300 saniye)
-MIN_PROFIT_DEFAULT = 40.0    # Bildirim gelmesi için en az 40 € (~78 лв) net kâr şartı
-DISCOUNT_THRESHOLD = 0.12    # Piyasanın en az %12 altında olmalı
-DB_FILE = "seen_ads.json"
+MIN_PROFIT_DEFAULT = 60.0    # Minimum net kâr eşiği (€)
+DISCOUNT_THRESHOLD = 0.12    # Piyasa medyanının en az %12 altında olmalı
+DB_FILE = "seen_ads.json"    # İlan takip hafızası
 # =====================================================
 
 EUR_BGN_RATE = 1.95583
@@ -26,7 +26,7 @@ USER_FILTER = {
     "target_model": None,
     "max_budget_eur": None,
     "min_profit_eur": MIN_PROFIT_DEFAULT,
-    "auto_scan": True        # Bot başlar başlamaz arka planda nöbete başlar
+    "auto_scan": True        # Bot açıldığında otomatik radar devrededir
 }
 
 EXCLUDE_TERMS = [
@@ -109,6 +109,7 @@ def send_telegram_message(message: str):
 
 def detect_model(title: str):
     t = title.lower()
+    # Hafıza birimlerini sil (128gb veya 512gb içindeki 12'yi model sanmasın)
     t = re.sub(r"\b\d+\s*(?:gb|гб|tb|тб)\b", " ", t)
 
     match = re.search(r"(?:iphone|айфон)\s*(1[1-7])\b", t)
@@ -234,7 +235,6 @@ def analyze_and_find_deals(listings, discount_threshold=0.12):
             if item["price_eur"] <= target_buy_price:
                 profit = reference_price - item["price_eur"]
 
-                # Gerçek dışı kârları filtrele
                 if profit <= 0 or profit > item["price_eur"] * 1.2:
                     continue
 
@@ -267,13 +267,11 @@ def perform_scan(is_manual=True):
 
     sorted_deals = sorted(deals, key=lambda x: x["profit_eur"], reverse=True)
 
-    # Manuel taramada ilk 8'i döker; Otomatik modda SADECE daha önce görülmemiş yeni ilanları atar
     if is_manual:
         deals_to_send = sorted_deals[:8]
     else:
         deals_to_send = [d for d in sorted_deals if d["link"] not in seen_ads_db]
 
-    # Otomatik modda kârlı yeni ilan yoksa SESSİZCE çıkar, mesaj atıp rahatsız etmez
     if not deals_to_send:
         if is_manual:
             send_telegram_message("ℹ️ Şu anda piyasa fiyatının altına satılan uygun ilan bulunamadı.")
@@ -281,14 +279,14 @@ def perform_scan(is_manual=True):
 
     for rank, deal in enumerate(deals_to_send, 1):
         seen_ads_db.add(deal["link"])
-        header_text = f"🔥 <b>YENİ KÂRLI İLAN YAKALANDI: {deal['model']}</b>" if not is_manual else f"🏆 <b>#{rank} FIRSAT: {deal['model']}</b>"
+        header_text = f"🔥 <b>YENİ KÂRLI İLAN: {deal['model']}</b>" if not is_manual else f"🏆 <b>#{rank} FIRSAT: {deal['model']}</b>"
         
         msg = (
             f"{header_text}\n"
             f"📌 <b>İlan:</b> {deal['title']}\n\n"
             f"💵 <b>Alış:</b> {deal['price_eur']:.2f} € (~{deal['price_eur'] * EUR_BGN_RATE:.0f} лв.)\n"
             f"📊 <b>Piyasa Değeri:</b> ~{deal['median_eur']:.2f} € (~{deal['median_eur'] * EUR_BGN_RATE:.0f} лв.)\n"
-            f"🚀 <b>Net Kâr: +{deal['profit_eur']:.2f} € (~{deal['profit_eur'] * EUR_BGN_RATE:.0f} лв.)</b>\n\n"
+            f"🚀 <b>Tahmini Kâr: +{deal['profit_eur']:.2f} € (~{deal['profit_eur'] * EUR_BGN_RATE:.0f} лв.)</b>\n\n"
             f"🔗 <a href='{deal['link']}'>İlana Git</a>"
         )
         send_telegram_message(msg)
@@ -326,12 +324,12 @@ def telegram_listener():
                     if lower_text in ["/start", "/help", "/yardim"]:
                         help_text = (
                             "👋 <b>OLX Fırsat Takip Botu:</b>\n\n"
-                            "🔎 <b>/tara</b> : En kârlı iPhone fırsatlarını manuel listeler.\n"
+                            "🔎 <b>/tara</b> : En kârlı iPhone fırsatlarını listeler.\n"
                             "📱 <b>/model [isim]</b> : Sadece belirtilen modeli takip eder.\n"
                             "💰 <b>/butce [tutar]</b> : Maksimum bütçe sınırı koyar.\n"
-                            "📈 <b>/kar [tutar]</b> : Bildirim gelmesi için minimum kâr eşiği (Örn: <code>/kar 50</code>)\n"
+                            "📈 <b>/kar [tutar]</b> : Minimum kâr eşiği belirler (Örn: <code>/kar 70</code>)\n"
                             "⚙️ <b>/ayarlar</b> : Aktif ayarları gösterir.\n"
-                            "🔄 <b>/oto [ac/kapat]</b> : Otomatik arka plan taramasını açar/kapatır.\n"
+                            "🔄 <b>/oto [ac/kapat]</b> : Otomatik radar taramasını açar/kapatır.\n"
                             "🗑 <b>/sifirla</b> : İlan hafızasını temizler."
                         )
                         send_telegram_message(help_text)
@@ -377,9 +375,9 @@ def telegram_listener():
                     elif lower_text == "/ayarlar":
                         mod = USER_FILTER["target_model"] or "Tümü"
                         btc = f"{USER_FILTER['max_budget_eur']:.0f} €" if USER_FILTER["max_budget_eur"] else "Limitsiz"
-                        oto = "Açık (5 dk aralıkla)" if USER_FILTER["auto_scan"] else "Kapalı"
+                        oto = "Açık (5 dk)" if USER_FILTER["auto_scan"] else "Kapalı"
                         info = (
-                            "⚙️ <b>AKTİF BOT AYARLARI:</b>\n\n"
+                            "⚙️️ <b>AKTİF BOT AYARLARI:</b>\n\n"
                             f"📱 <b>Takip Edilen Model:</b> {mod}\n"
                             f"💰 <b>Maks Bütçe:</b> {btc}\n"
                             f"📈 <b>Minimum Kâr Şartı:</b> +{USER_FILTER['min_profit_eur']:.0f} €\n"
@@ -399,13 +397,12 @@ def telegram_listener():
 
 
 def background_auto_scanner():
-    """Her 5 dakikada bir sessizce tarar; sadece yeni ve kârlı fırsat düşerse bildirim atar."""
     while True:
         try:
             if USER_FILTER["auto_scan"]:
                 perform_scan(is_manual=False)
         except Exception as e:
-            print(f"[!] Arka plan tarama hatası: {e}")
+            print(f"[!] Radar hatası: {e}")
             
         time.sleep(CHECK_INTERVAL_SEC)
 
@@ -424,26 +421,29 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
 def run_http_server():
     port = int(os.environ.get("PORT", 10000))
     with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
-        print(f"[*] Web portu aktif: {port}")
+        print(f"[*] Render web portu dinleniyor: {port}")
         httpd.serve_forever()
 
 
 def main():
-    print("[*] Fırsat Radarı Takip Botu Başlatıldı...")
+    print("[*] iPhone Fırsat Radarı Başlatıldı...")
     
+    # 1. Telegram komut dinleyicisi
     listener_thread = threading.Thread(target=telegram_listener, daemon=True)
     listener_thread.start()
 
+    # 2. Otomatik 5 dakikalık arka plan tarayıcısı
     auto_thread = threading.Thread(target=background_auto_scanner, daemon=True)
     auto_thread.start()
 
     send_telegram_message(
-        "🚀 <b>Fırsat Radarı 7/24 Devrede!</b>\n\n"
+        "🚀 <b>Bot Render Bulutunda 7/24 Aktif!</b>\n\n"
         "• Sistem her 5 dakikada bir sessizce tarar.\n"
         f"• Yalnızca <b>+{MIN_PROFIT_DEFAULT:.0f} € ve üzeri</b> kâr bırakan yeni ilanlar düştüğünde bildirim alacaksın.\n"
-        "• Gereksiz bildirim gönderilmez."
+        "• Dilediğin zaman <b>/tara</b> yazarak manuel liste çekebilirsin."
     )
 
+    # 3. Render port taramasını (Port scan timeout) çözen web sunucusu
     run_http_server()
 
 
