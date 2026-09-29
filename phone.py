@@ -102,7 +102,7 @@ def detect_model(title: str):
 def scrape_olx_page(page: int = 1):
     """OLX Bulgaristan Apple kategorisini 404 almayacak temiz URL ile tarar."""
     # Kesin çalışan temiz kategori linki:
-    target_url = f"https://www.olx.bg/elektronika/telefoni/smartfoni/apple/?search%5Border%5D=created_at:desc&page={page}"
+    target_url = f"https://www.olx.bg/elektronika/telefoni/iphone/?search%5Border%5D=created_at:desc&page={page}"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
