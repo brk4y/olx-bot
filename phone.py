@@ -10,7 +10,7 @@ from curl_cffi import requests
 
 # ================= TELEGRAM AYARLARI =================
 BOT_TOKEN = "8980586429:AAHo3dkEiE2Veb7rLYgE-8xWD9h4CANjHgo"
-CHAT_ID = "BURAYA_USERINFO_ID_YAZ"  # @userinfobot'un verdiği ID rakamları
+CHAT_ID = "1519060691"  # @userinfobot'un verdiği ID rakamları
 
 SCAN_LIMIT = 150             # Taranacak ilan sayısı
 DISCOUNT_THRESHOLD = 0.12    # %12 ve üzeri kâr bırakan fırsatları yakalar
