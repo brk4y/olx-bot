@@ -4,15 +4,17 @@ import json
 import time
 import threading
 import statistics
+import http.server
+import socketserver
 from curl_cffi import requests
 
 # ================= TELEGRAM AYARLARI =================
 BOT_TOKEN = "8980586429:AAHo3dkEiE2Veb7rLYgE-8xWD9h4CANjHgo"
-CHAT_ID = "1519060691"  # @userinfobot'un verdiği ID rakamları
+CHAT_ID = "BURAYA_USERINFO_ID_YAZ"  # @userinfobot'un verdiği ID rakamları
 
-SCAN_LIMIT = 150  # Taranacak ilan sayısı
-DISCOUNT_THRESHOLD = 0.12  # %12 ve üzeri kâr bırakan fırsatları yakalar
-DB_FILE = "seen_ads.json"  # İlan takip hafızası
+SCAN_LIMIT = 150             # Taranacak ilan sayısı
+DISCOUNT_THRESHOLD = 0.12    # %12 ve üzeri kâr bırakan fırsatları yakalar
+DB_FILE = "seen_ads.json"    # İlan takip hafızası
 # =====================================================
 
 EUR_BGN_RATE = 1.95583
@@ -28,43 +30,43 @@ USER_FILTER = {
 EXCLUDE_TERMS = [
     "калъф", "калъфи", "кейс", "кейсове", "case", "cover", "гръбче", "гръб",
     "протектор", "стъкло", "стъклен", "за части", "части", "icloud", "айклауд",
-    "заключен", "счупен", "спукан", "дисплей", "кутия", "капак", "батерия",
+    "заключен", "счупен", "спукан", "дисплей", "кутия", "капак", "батерия", 
     "камера", "панел", "за ремонт", "дефект", "без face id", "face id не работи", "реплика"
 ]
 
 MODEL_CONFIG = {
     "iPhone 17 Pro Max": {"min": 1250, "max_cap": 1600},
-    "iPhone 17 Pro": {"min": 1100, "max_cap": 1400},
-    "iPhone 17": {"min": 850, "max_cap": 1100},
+    "iPhone 17 Pro":     {"min": 1100, "max_cap": 1400},
+    "iPhone 17":         {"min": 850,  "max_cap": 1100},
 
     "iPhone 16 Pro Max": {"min": 850, "max_cap": 1200},
-    "iPhone 16 Pro": {"min": 720, "max_cap": 1000},
-    "iPhone 16 Plus": {"min": 600, "max_cap": 850},
-    "iPhone 16": {"min": 520, "max_cap": 750},
-
+    "iPhone 16 Pro":     {"min": 720, "max_cap": 1000},
+    "iPhone 16 Plus":    {"min": 600, "max_cap": 850},
+    "iPhone 16":         {"min": 520, "max_cap": 750},
+    
     "iPhone 15 Pro Max": {"min": 680, "max_cap": 950},
-    "iPhone 15 Pro": {"min": 560, "max_cap": 800},
-    "iPhone 15 Plus": {"min": 480, "max_cap": 650},
-    "iPhone 15": {"min": 430, "max_cap": 600},
+    "iPhone 15 Pro":     {"min": 560, "max_cap": 800},
+    "iPhone 15 Plus":    {"min": 480, "max_cap": 650},
+    "iPhone 15":         {"min": 430, "max_cap": 600},
 
     "iPhone 14 Pro Max": {"min": 520, "max_cap": 750},
-    "iPhone 14 Pro": {"min": 450, "max_cap": 650},
-    "iPhone 14 Plus": {"min": 360, "max_cap": 500},
-    "iPhone 14": {"min": 330, "max_cap": 480},
+    "iPhone 14 Pro":     {"min": 450, "max_cap": 650},
+    "iPhone 14 Plus":    {"min": 360, "max_cap": 500},
+    "iPhone 14":         {"min": 330, "max_cap": 480},
 
     "iPhone 13 Pro Max": {"min": 420, "max_cap": 600},
-    "iPhone 13 Pro": {"min": 350, "max_cap": 500},
-    "iPhone 13 mini": {"min": 240, "max_cap": 350},
-    "iPhone 13": {"min": 280, "max_cap": 400},
+    "iPhone 13 Pro":     {"min": 350, "max_cap": 500},
+    "iPhone 13 mini":    {"min": 240, "max_cap": 350},
+    "iPhone 13":         {"min": 280, "max_cap": 400},
 
     "iPhone 12 Pro Max": {"min": 290, "max_cap": 420},
-    "iPhone 12 Pro": {"min": 240, "max_cap": 360},
-    "iPhone 12 mini": {"min": 150, "max_cap": 220},
-    "iPhone 12": {"min": 180, "max_cap": 260},
+    "iPhone 12 Pro":     {"min": 240, "max_cap": 360},
+    "iPhone 12 mini":    {"min": 150, "max_cap": 220},
+    "iPhone 12":         {"min": 180, "max_cap": 260},
 
     "iPhone 11 Pro Max": {"min": 210, "max_cap": 300},
-    "iPhone 11 Pro": {"min": 170, "max_cap": 250},
-    "iPhone 11": {"min": 130, "max_cap": 200},
+    "iPhone 11 Pro":     {"min": 170, "max_cap": 250},
+    "iPhone 11":         {"min": 130, "max_cap": 200},
 }
 
 
@@ -105,18 +107,14 @@ def send_telegram_message(message: str):
 
 def detect_model(title: str):
     t = title.lower()
-
-    # 1. Hafıza birimlerini sil (128gb veya 512gb içerisindeki '12' modelle çakışmasın)
     t = re.sub(r"\b\d+\s*(?:gb|гб|tb|тб)\b", " ", t)
 
-    # 2. Sadece iPhone/айфон ifadesinden hemen sonra gelen 11-17 serisi rakamı al
     match = re.search(r"(?:iphone|айфон)\s*(1[1-7])\b", t)
     if not match:
         return None, None, None
 
     series = match.group(1)
 
-    # 3. Varyant belirleme
     if "pro max" in t:
         name = f"iPhone {series} Pro Max"
     elif "pro" in t:
@@ -217,9 +215,8 @@ def analyze_and_find_deals(listings, discount_threshold=0.12):
         base_min = items[0]["market_min"]
         max_cap = items[0]["max_cap"]
 
-        # Sadece model için tanımlı mantıklı fiyat aralığındaki ilanları hesaba kat
         valid_prices = [
-            x["price_eur"] for x in items
+            x["price_eur"] for x in items 
             if base_min * 0.7 <= x["price_eur"] <= max_cap
         ]
 
@@ -235,7 +232,6 @@ def analyze_and_find_deals(listings, discount_threshold=0.12):
             if item["price_eur"] <= target_buy_price:
                 profit = reference_price - item["price_eur"]
 
-                # Hayali kârları engelle
                 if profit <= 0 or profit > item["price_eur"] * 1.2:
                     continue
 
@@ -310,7 +306,7 @@ def telegram_listener():
         try:
             params = {"offset": LAST_UPDATE_ID + 1, "timeout": 20}
             res = requests.get(url, params=params, timeout=25)
-
+            
             if res.status_code == 200:
                 data = res.json().get("result", [])
                 for update in data:
@@ -401,19 +397,40 @@ def background_auto_scanner():
         time.sleep(300)
 
 
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - Bot is running 7/24")
+
+    def log_message(self, format, *args):
+        return  # Log kirliliğini önle
+
+
+def run_http_server():
+    """Render'ın aradığı web portunu açar (Port Scan hatasını çözer)."""
+    port = int(os.environ.get("PORT", 10000))
+    with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+        print(f"[*] Web portu aktif: {port}")
+        httpd.serve_forever()
+
+
 def main():
     print("[*] iPhone Takip Botu Başlatıldı...")
-
+    
+    # 1. Telegram komut dinleyici
     listener_thread = threading.Thread(target=telegram_listener, daemon=True)
     listener_thread.start()
 
+    # 2. Otomatik tarayıcı thread'i
     auto_thread = threading.Thread(target=background_auto_scanner, daemon=True)
     auto_thread.start()
 
-    send_telegram_message("✅ <b>Bot Yenilendi!</b> Hafıza temizlendi, şimdi <b>/tara</b> yazabilirsin.")
+    send_telegram_message("✅ <b>Bot Render Bulutunda Aktif!</b>\nŞimdi <b>/tara</b> yazabilirsin.")
 
-    while True:
-        time.sleep(3600)
+    # 3. Render için HTTP sunucusunu ana thread'de çalıştır (Port scan hatasını çözer)
+    run_http_server()
 
 
 if __name__ == "__main__":
