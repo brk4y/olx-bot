@@ -16,7 +16,7 @@ CHAT_ID = "1519060691"
 BGN_TO_EUR = 1.95583
 
 # Bildirim tetikleme eşiği (Euro cinsinden)
-MIN_PROFIT_DEFAULT = 10.0  # Test için 10 € yapıldı, dilediğinde 50-60 yapabilirsin
+MIN_PROFIT_DEFAULT = 65.0  # Test için 10 € yapıldı, dilediğinde 50-60 yapabilirsin
 
 # Model referans taban piyasa fiyatları (Euro)
 BASE_MARKET_PRICES = {
