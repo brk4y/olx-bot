@@ -3,6 +3,7 @@ import re
 import time
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
@@ -14,9 +15,10 @@ CHAT_ID = "1519060691"  # Kendi sayısal ID numaranı yaz
 BGN_TO_EUR = 1.95583
 
 # Dinamik Filtre Değişkenleri
-MIN_PROFIT_DEFAULT = 50.0   # Minimum kâr eşiği (€)
+MIN_PROFIT_DEFAULT = 50.0   # Minimum net kâr eşiği (€)
 MAX_BUDGET = 9999.0         # Maksimum bütçe sınırı (€)
-FILTER_MODEL = None         # Belirli bir model filtresi (None = hepsi)
+FILTER_MODEL = None         # Spesifik model filtresi (None = hepsi)
+MIN_BATTERY = None          # Minimum pil sağlığı (%) (None = filtre kapalı)
 
 BASE_MARKET_PRICES = {
     "iphone 11": 220.0,
@@ -88,16 +90,33 @@ def detect_model(title: str):
                 longest_len = len(model_key)
     return matched_model
 
+def extract_battery_health(text: str):
+    """Metin içindeki batarya yüzdesini tespit eder (%85, 85%, bateriq 85 vb.)."""
+    patterns = [
+        r'%\s*(\d{2,3})',
+        r'(\d{2,3})\s*%',
+        r'(?:battery|bateriq|bateria)\s*(\d{2,3})'
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            val = int(m.group(1))
+            if 50 <= val <= 100:
+                return val
+    return None
+
 def format_deals_message(deals: list) -> str:
     header = f"🎯 <b>FIRSATLAR ({len(deals)} İlan)</b>\n\n"
     items_text = []
     for d in deals:
+        battery_str = f"\n🔋 <b>Pil:</b> %{d['battery']}" if d.get("battery") else ""
         block = (
             f"📱 <b>{d['model']}</b>\n"
             f"🏷 <i>{d['title']}</i>\n"
             f"💵 <b>Fiyat:</b> {d['price_eur']:.2f} €\n"
             f"📊 <b>Piyasa:</b> ~{d['market_eur']:.2f} €\n"
-            f"📈 <b>Kâr:</b> <b>+{d['profit_eur']:.2f} €</b>\n"
+            f"📈 <b>Kâr:</b> <b>+{d['profit_eur']:.2f} €</b>"
+            f"{battery_str}\n"
             f"🔗 <a href='{d['url']}'>İlana Git</a>"
         )
         items_text.append(block)
@@ -115,7 +134,7 @@ def scrape_olx_page(page: int = 1):
     
     try:
         resp = cffi_requests.get(target_url, headers=headers, impersonate="chrome120", timeout=15)
-        LAST_SCAN_TIME = datetime.now().strftime("%H:%M:%S")
+        LAST_SCAN_TIME = datetime.now(ZoneInfo("Europe/Sofia")).strftime("%H:%M:%S")
         if resp.status_code != 200:
             return []
     except Exception:
@@ -156,7 +175,7 @@ def scrape_olx_page(page: int = 1):
 
     return listings
 
-def evaluate_and_filter(listings, min_profit, max_budget=9999.0, model_filter=None):
+def evaluate_and_filter(listings, min_profit, max_budget=9999.0, model_filter=None, min_battery=None):
     good_deals = []
     for item in listings:
         title_low = item["title"].lower()
@@ -167,14 +186,20 @@ def evaluate_and_filter(listings, min_profit, max_budget=9999.0, model_filter=No
         if not model:
             continue
             
-        # Model filtresi kontrolü
+        # Model kontrolü
         if model_filter and model_filter.lower() not in model.lower():
             continue
             
-        # Bütçe filtresi kontrolü
+        # Bütçe kontrolü
         if item["price_eur"] > max_budget:
             continue
             
+        # Pil sağlığı kontrolü (Başlıkta belirtilmişse)
+        bat_val = extract_battery_health(item["title"])
+        if min_battery and bat_val:
+            if bat_val < min_battery:
+                continue
+
         market_val = BASE_MARKET_PRICES[model]
         profit = market_val - item["price_eur"]
         if profit >= min_profit:
@@ -185,6 +210,7 @@ def evaluate_and_filter(listings, min_profit, max_budget=9999.0, model_filter=No
                 "price_eur": item["price_eur"],
                 "market_eur": market_val,
                 "profit_eur": profit,
+                "battery": bat_val,
                 "url": item["url"]
             })
     return good_deals
@@ -194,7 +220,13 @@ def background_auto_scanner():
     while True:
         try:
             items = scrape_olx_page(page=1)
-            deals = evaluate_and_filter(items, min_profit=MIN_PROFIT_DEFAULT, max_budget=MAX_BUDGET, model_filter=FILTER_MODEL)
+            deals = evaluate_and_filter(
+                items, 
+                min_profit=MIN_PROFIT_DEFAULT, 
+                max_budget=MAX_BUDGET, 
+                model_filter=FILTER_MODEL,
+                min_battery=MIN_BATTERY
+            )
             new_deals = []
             for deal in deals:
                 if deal["id"] not in SEEN_LISTING_IDS:
@@ -207,9 +239,9 @@ def background_auto_scanner():
             print(f"[!] Otomatik tarama hatası: {e}")
         time.sleep(300)
 
-# ================= SADELEŞTİRİLMİŞ TELEGRAM KOMUTLARI =================
+# ================= TELEGRAM KOMUTLARI =================
 def telegram_listener():
-    global MIN_PROFIT_DEFAULT, MAX_BUDGET, FILTER_MODEL, SEEN_LISTING_IDS
+    global MIN_PROFIT_DEFAULT, MAX_BUDGET, FILTER_MODEL, MIN_BATTERY, SEEN_LISTING_IDS
     last_update_id = 0
     while True:
         try:
@@ -222,27 +254,33 @@ def telegram_listener():
                     text = msg_obj.get("text", "").strip()
                     lower_text = text.lower()
 
-                    # 1. TARA (tara, /tara)
+                    # 1. TARA
                     if lower_text in ["tara", "/tara"]:
                         send_telegram_message("🔍 OLX taranıyor...")
                         items = scrape_olx_page(page=1)
-                        deals = evaluate_and_filter(items, min_profit=MIN_PROFIT_DEFAULT, max_budget=MAX_BUDGET, model_filter=FILTER_MODEL)
+                        deals = evaluate_and_filter(
+                            items, 
+                            min_profit=MIN_PROFIT_DEFAULT, 
+                            max_budget=MAX_BUDGET, 
+                            model_filter=FILTER_MODEL,
+                            min_battery=MIN_BATTERY
+                        )
                         if not deals:
                             send_telegram_message(f"⚠️ Kriterlere uygun (+{MIN_PROFIT_DEFAULT:.0f} € kâr) yeni ilan bulunamadı.")
                         else:
                             msg = format_deals_message(deals[:5])
                             send_telegram_message(msg)
 
-                    # 2. KAR (kar 60, /kar 60)
+                    # 2. KAR
                     elif lower_text.startswith("kar") or lower_text.startswith("/kar"):
                         parts = text.split()
                         if len(parts) >= 2 and parts[1].replace(".", "", 1).isdigit():
                             MIN_PROFIT_DEFAULT = float(parts[1])
                             send_telegram_message(f"✅ Kâr eşiği: <b>+{MIN_PROFIT_DEFAULT:.0f} €</b>")
                         else:
-                            send_telegram_message("⚠️ Örnek: <code>kar 60</code>")
+                            send_telegram_message("⚠️️ Örnek: <code>kar 60</code>")
 
-                    # 3. BUTCE (butce 400, /butce 400)
+                    # 3. BUTCE
                     elif lower_text.startswith("butce") or lower_text.startswith("/butce"):
                         parts = text.split()
                         if len(parts) >= 2 and parts[1].replace(".", "", 1).isdigit():
@@ -251,54 +289,74 @@ def telegram_listener():
                         else:
                             send_telegram_message("⚠️ Örnek: <code>butce 400</code>")
 
-                    # 4. MODEL (model 13 pro, /model 13, model hepsi)
+                    # 4. MODEL
                     elif lower_text.startswith("model") or lower_text.startswith("/model"):
                         parts = text.split(maxsplit=1)
                         if len(parts) == 2:
                             val = parts[1].strip()
                             if val.lower() in ["hepsi", "tum", "iptal", "reset"]:
                                 FILTER_MODEL = None
-                                send_telegram_message("✅ Model filtresi kaldırıldı. Tüm iPhone'lar aranıyor.")
+                                send_telegram_message("✅ Model filtresi kaldırıldı. Tüm iPhone'lar taranıyor.")
                             else:
                                 FILTER_MODEL = val
                                 send_telegram_message(f"✅ Hedef model: <b>iPhone {FILTER_MODEL.upper()}</b>")
                         else:
                             send_telegram_message("⚠️ Örnek: <code>model 13 pro</code> veya <code>model hepsi</code>")
 
-                    # 5. DURUM (durum, /durum)
+                    # 5. PIL
+                    elif lower_text.startswith("pil") or lower_text.startswith("/pil"):
+                        parts = text.split()
+                        if len(parts) == 2:
+                            val = parts[1].strip().lower()
+                            if val in ["hepsi", "tum", "iptal", "reset", "0"]:
+                                MIN_BATTERY = None
+                                send_telegram_message("✅ Pil sağlığı filtresi kaldırıldı.")
+                            elif val.isdigit():
+                                MIN_BATTERY = int(val)
+                                send_telegram_message(f"✅ Minimum pil sağlığı: <b>%{MIN_BATTERY}</b>")
+                            else:
+                                send_telegram_message("⚠️ Örnek: <code>pil 85</code> veya <code>pil hepsi</code>")
+                        else:
+                            send_telegram_message("⚠️ Örnek: <code>pil 85</code> veya <code>pil hepsi</code>")
+
+                    # 6. DURUM
                     elif lower_text in ["durum", "/durum"]:
                         model_str = f"iPhone {FILTER_MODEL.upper()}" if FILTER_MODEL else "Tüm Modeller"
                         budget_str = f"{MAX_BUDGET:.0f} €" if MAX_BUDGET < 9000 else "Sınırsız"
+                        bat_str = f"%{MIN_BATTERY} ve üzeri" if MIN_BATTERY else "Filtresiz"
                         status_msg = (
                             "⚙️ <b>Güncel Durum & Ayarlar</b>\n\n"
                             f"• <b>Kâr Eşiği:</b> +{MIN_PROFIT_DEFAULT:.0f} €\n"
                             f"• <b>Bütçe Limiti:</b> {budget_str}\n"
                             f"• <b>Filtrelenen Model:</b> {model_str}\n"
+                            f"• <b>Pil Kriteri:</b> {bat_str}\n"
                             f"• <b>Hafızadaki İlan:</b> {len(SEEN_LISTING_IDS)} adet\n"
-                            f"• <b>Son Tarama:</b> {LAST_SCAN_TIME}\n"
+                            f"• <b>Son Tarama Saati:</b> {LAST_SCAN_TIME}\n"
                             f"• <b>Sistem:</b> 7/24 Aktif"
                         )
                         send_telegram_message(status_msg)
 
-                    # 6. SIFIRLA (sifirla, /sifirla)
+                    # 7. SIFIRLA
                     elif lower_text in ["sifirla", "/sifirla"]:
                         MIN_PROFIT_DEFAULT = 50.0
                         MAX_BUDGET = 9999.0
                         FILTER_MODEL = None
+                        MIN_BATTERY = None
                         SEEN_LISTING_IDS.clear()
-                        send_telegram_message("🔄 <b>Tüm ayarlar ve ilan hafızası sıfırlandı!</b>\n(Kâr: +50 €, Bütçe: Sınırsız, Modeller: Hepsi)")
+                        send_telegram_message("🔄 <b>Tüm ayarlar ve ilan hafızası sıfırlandı!</b>\n(Kâr: +50 €, Bütçe: Sınırsız, Model: Hepsi, Pil: Filtresiz)")
 
-                    # 7. YARDIM (yardim, /yardim, ?)
+                    # 8. YARDIM
                     elif lower_text in ["yardim", "/yardim", "?", "/help", "/start"]:
                         help_text = (
                             "🤖 <b>Kullanabileceğin Komutlar:</b>\n\n"
                             "• <b>tara</b> : Fırsatları tek mesajda listeler\n"
-                            "• <b>kar 60</b> : Minimum net kâr eşiğini ayarlar\n"
+                            "• <b>kar 60</b> : Minimum kâr eşiğini ayarlar\n"
                             "• <b>butce 350</b> : Maksimum cihaz fiyatını sınırlar\n"
                             "• <b>model 13</b> : Sadece belirtilen modeli arar (kaldırmak için: <code>model hepsi</code>)\n"
-                            "• <b>durum</b> : Aktif filtreleri ve ayarları gösterir\n"
+                            "• <b>pil 85</b> : Minimum pil sağlığını ayarlar (kaldırmak için: <code>pil hepsi</code>)\n"
+                            "• <b>durum</b> : Aktif ayarları ve son tarama saatini gösterir\n"
                             "• <b>sifirla</b> : Tüm ayarları ve hafızayı sıfırlar\n"
-                            "• <b>yardim</b> : Bu listeyi açar"
+                            "• <b>yardim</b> : Bu rehberi açar"
                         )
                         send_telegram_message(help_text)
 
